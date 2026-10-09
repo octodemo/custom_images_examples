@@ -1,0 +1,218 @@
+name: Compare before and after custom image
+
+on:
+  workflow_dispatch:
+    inputs:
+      telemetry:
+        description: Collect CPU, memory, disk, network, and process telemetry
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  before:
+    name: Before - windows-latest
+    runs-on: windows-latest
+    timeout-minutes: 120
+    outputs:
+      checkout_seconds: ${{ steps.checkout_timing.outputs.elapsed_seconds }}
+      sql_seconds: ${{ steps.sql_timing.outputs.elapsed_seconds }}
+      total_seconds: ${{ steps.total_timing.outputs.elapsed_seconds }}
+
+    steps:
+      - name: Start optional runner telemetry
+        if: ${{ inputs.telemetry }}
+        uses: tsviz/actions-runner-telemetry@c15eb88c652d9a26a572438a0d1b8c10af782e2e # v1
+
+      - name: Start total timer
+        shell: pwsh
+        run: |
+          [System.Diagnostics.Stopwatch]::GetTimestamp() |
+            Set-Content -LiteralPath "$env:RUNNER_TEMP\total-start.txt"
+          [System.Diagnostics.Stopwatch]::GetTimestamp() |
+            Set-Content -LiteralPath "$env:RUNNER_TEMP\checkout-start.txt"
+
+      - name: Check out the complete repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Record cold checkout duration
+        id: checkout_timing
+        shell: pwsh
+        run: |
+          $start = [long](Get-Content -LiteralPath "$env:RUNNER_TEMP\checkout-start.txt")
+          $ticks = [System.Diagnostics.Stopwatch]::GetTimestamp() - $start
+          $seconds = [math]::Round(
+            $ticks / [System.Diagnostics.Stopwatch]::Frequency,
+            2
+          )
+          "elapsed_seconds=$seconds" >> $env:GITHUB_OUTPUT
+
+      - name: Install and verify SQL Server
+        id: sql_timing
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          ./scripts/Install-SqlServer.ps1
+          ./scripts/Test-SqlServer.ps1 -CreateExampleDatabase
+          $timer.Stop()
+          $seconds = $timer.Elapsed.TotalSeconds.ToString(
+            "0.00",
+            [Globalization.CultureInfo]::InvariantCulture
+          )
+          "elapsed_seconds=$seconds" >> $env:GITHUB_OUTPUT
+
+      - name: Record total before duration
+        id: total_timing
+        shell: pwsh
+        run: |
+          $start = [long](Get-Content -LiteralPath "$env:RUNNER_TEMP\total-start.txt")
+          $ticks = [System.Diagnostics.Stopwatch]::GetTimestamp() - $start
+          $seconds = [math]::Round(
+            $ticks / [System.Diagnostics.Stopwatch]::Frequency,
+            2
+          )
+          "elapsed_seconds=$seconds" >> $env:GITHUB_OUTPUT
+
+      - name: Publish optional runner telemetry
+        if: ${{ always() && inputs.telemetry }}
+        uses: tsviz/actions-runner-telemetry@c15eb88c652d9a26a572438a0d1b8c10af782e2e # v1
+        with:
+          mode: stop
+
+  after:
+    name: After - custom image
+    runs-on: ${{ vars.CUSTOM_IMAGE_RUNNER || 'windows-monorepo-sqlserver-runner' }}
+    timeout-minutes: 30
+    outputs:
+      checkout_seconds: ${{ steps.checkout_timing.outputs.elapsed_seconds }}
+      sql_seconds: ${{ steps.sql_timing.outputs.elapsed_seconds }}
+      total_seconds: ${{ steps.total_timing.outputs.elapsed_seconds }}
+
+    steps:
+      - name: Start optional runner telemetry
+        if: ${{ inputs.telemetry }}
+        uses: tsviz/actions-runner-telemetry@c15eb88c652d9a26a572438a0d1b8c10af782e2e # v1
+
+      - name: Start timer and initialize from image cache
+        id: initialize
+        shell: pwsh
+        env:
+          REMOTE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          [System.Diagnostics.Stopwatch]::GetTimestamp() |
+            Set-Content -LiteralPath "$env:RUNNER_TEMP\total-start.txt"
+          $elapsed = & C:\ProgramData\GitHubCustomImage\Initialize-WarmCheckout.ps1 `
+            -WorkspacePath $env:GITHUB_WORKSPACE `
+            -RemoteUrl $env:REMOTE_URL
+          "elapsed_seconds=$elapsed" >> $env:GITHUB_OUTPUT
+          [System.Diagnostics.Stopwatch]::GetTimestamp() |
+            Set-Content -LiteralPath "$env:RUNNER_TEMP\checkout-start.txt"
+
+      - name: Check out requested revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Record warm checkout duration
+        id: checkout_timing
+        shell: pwsh
+        env:
+          INITIALIZE_SECONDS: ${{ steps.initialize.outputs.elapsed_seconds }}
+        run: |
+          $start = [long](Get-Content -LiteralPath "$env:RUNNER_TEMP\checkout-start.txt")
+          $ticks = [System.Diagnostics.Stopwatch]::GetTimestamp() - $start
+          $checkout = $ticks / [System.Diagnostics.Stopwatch]::Frequency
+          $seconds = [math]::Round(
+            [double]$env:INITIALIZE_SECONDS + $checkout,
+            2
+          )
+          "elapsed_seconds=$seconds" >> $env:GITHUB_OUTPUT
+
+      - name: Verify preinstalled SQL Server
+        id: sql_timing
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          ./scripts/Test-SqlServer.ps1 -CreateExampleDatabase
+          $timer.Stop()
+          $seconds = $timer.Elapsed.TotalSeconds.ToString(
+            "0.00",
+            [Globalization.CultureInfo]::InvariantCulture
+          )
+          "elapsed_seconds=$seconds" >> $env:GITHUB_OUTPUT
+
+      - name: Record total after duration
+        id: total_timing
+        shell: pwsh
+        run: |
+          $start = [long](Get-Content -LiteralPath "$env:RUNNER_TEMP\total-start.txt")
+          $ticks = [System.Diagnostics.Stopwatch]::GetTimestamp() - $start
+          $seconds = [math]::Round(
+            $ticks / [System.Diagnostics.Stopwatch]::Frequency,
+            2
+          )
+          "elapsed_seconds=$seconds" >> $env:GITHUB_OUTPUT
+
+      - name: Publish optional runner telemetry
+        if: ${{ always() && inputs.telemetry }}
+        uses: tsviz/actions-runner-telemetry@c15eb88c652d9a26a572438a0d1b8c10af782e2e # v1
+        with:
+          mode: stop
+
+  comparison:
+    name: Before versus after
+    needs:
+      - before
+      - after
+    runs-on: ubuntu-latest
+    env:
+      BEFORE_CHECKOUT: ${{ needs.before.outputs.checkout_seconds }}
+      AFTER_CHECKOUT: ${{ needs.after.outputs.checkout_seconds }}
+      BEFORE_SQL: ${{ needs.before.outputs.sql_seconds }}
+      AFTER_SQL: ${{ needs.after.outputs.sql_seconds }}
+      BEFORE_TOTAL: ${{ needs.before.outputs.total_seconds }}
+      AFTER_TOTAL: ${{ needs.after.outputs.total_seconds }}
+
+    steps:
+      - name: Publish comparison
+        shell: pwsh
+        run: |
+          $beforeTotal = [double]::Parse(
+            $env:BEFORE_TOTAL,
+            [Globalization.CultureInfo]::InvariantCulture
+          )
+          $afterTotal = [double]::Parse(
+            $env:AFTER_TOTAL,
+            [Globalization.CultureInfo]::InvariantCulture
+          )
+          $saved = [math]::Round($beforeTotal - $afterTotal, 2)
+          $speedup = if ($afterTotal -gt 0) {
+            [math]::Round($beforeTotal / $afterTotal, 1)
+          } else {
+            "n/a"
+          }
+          $percent = if ($beforeTotal -gt 0) {
+            [math]::Round((1 - ($afterTotal / $beforeTotal)) * 100, 1)
+          } else {
+            0
+          }
+
+          @"
+          # Custom image: before and after
+
+          | Measurement | Before: **windows-latest** | After: custom image |
+          |---|---:|---:|
+          | Full-history checkout | $env:BEFORE_CHECKOUT s | $env:AFTER_CHECKOUT s |
+          | SQL Server install/readiness | $env:BEFORE_SQL s | $env:AFTER_SQL s |
+          | **Total measured setup** | **$env:BEFORE_TOTAL s** | **$env:AFTER_TOTAL s** |
+
+          **Result:** the custom image saved **$saved seconds** (**$percent%**) and
+          completed the measured setup **${speedup}x faster**.
+
+          Runner queue and provisioning time are intentionally excluded because
+          the timer starts in the first step of each job.
+          "@ >> $env:GITHUB_STEP_SUMMARY

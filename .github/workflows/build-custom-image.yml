@@ -1,0 +1,73 @@
+name: Build Windows monorepo image
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-monorepo-sqlserver-image
+  cancel-in-progress: false
+
+jobs:
+  build-image:
+    name: Build image
+    runs-on: ${{ vars.IMAGE_GENERATION_RUNNER || 'windows-image-generation' }}
+    timeout-minutes: 180
+    snapshot:
+      image-name: windows-monorepo-sqlserver
+      version: "1.*"
+
+    steps:
+      - name: Check out the complete repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: image-source
+          persist-credentials: false
+
+      - name: Install SQL Server Developer
+        shell: pwsh
+        run: ./image-source/scripts/Install-SqlServer.ps1
+
+      - name: Seed the repository mirror
+        shell: pwsh
+        env:
+          CACHE_ROOT: C:\ProgramData\GitHubCustomImage
+          REMOTE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          ./image-source/scripts/Seed-GitRepository.ps1 `
+            -SourcePath "$env:GITHUB_WORKSPACE\image-source" `
+            -CacheRoot $env:CACHE_ROOT `
+            -RemoteUrl $env:REMOTE_URL
+
+          Copy-Item `
+            -LiteralPath ./image-source/scripts/Initialize-WarmCheckout.ps1 `
+            -Destination "$env:CACHE_ROOT\Initialize-WarmCheckout.ps1" `
+            -Force
+
+      - name: Validate SQL Server
+        shell: pwsh
+        run: ./image-source/scripts/Test-SqlServer.ps1
+
+      - name: Validate the credential-free mirror
+        shell: pwsh
+        env:
+          MIRROR_PATH: C:\ProgramData\GitHubCustomImage\repository.git
+        run: |
+          git -C $env:MIRROR_PATH fsck --full
+
+          $config = git -C $env:MIRROR_PATH config --list --show-origin
+          if ($config -match 'http\..*extraheader|AUTHORIZATION|x-access-token') {
+            throw "The image cache contains GitHub credentials."
+          }
+
+      - name: Remove the temporary checkout
+        shell: pwsh
+        run: |
+          Set-Location $env:RUNNER_TEMP
+          Remove-Item -LiteralPath "$env:GITHUB_WORKSPACE\image-source" -Recurse -Force
+
